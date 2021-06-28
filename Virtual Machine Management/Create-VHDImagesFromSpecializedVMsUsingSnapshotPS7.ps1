@@ -11,16 +11,17 @@
     The snapshots will then be removed and the VM will be returned to its initial power state.
 
 .EXAMPLE
-    .\Create-VHDImagesFromSpecializedVMsUsingSnapshot.ps1
+    .\Create-VHDImagesFromSpecializedVMsUsingSnapshotPS7.ps1
 #>
 [CmdletBinding()]
 Param
 (
 
 )
+#Requires -Version 7
 
 $VerbosePreference = 'Continue'
-
+$ErrorActionPreference = 'Stop'
 Function Invoke-ResourceNameAvailability
 {
     [CmdletBinding()]
@@ -304,7 +305,7 @@ $VirtualMachineSubscriptions = Get-AzSubscription | Where-Object {$_.State -eq '
 if ($VirtualMachineSubscriptions.Count -gt '1')
 {
     $VirtualMachineSubscription = $VirtualMachineSubscriptions | Out-GridView -Title "Please Select the Subscription containing your Virtual Machines." -PassThru
-    Set-AzContext $Subscription
+    Set-AzContext $VirtualMachineSubscription
 }
 #endregion
 
@@ -343,71 +344,77 @@ else
 $StorageAccount = Invoke-StorageAccountSelectionCreation -Location $Location
 $StorageAccountKey = Get-AzStorageAccountKey -ResourceGroupName $StorageAccount.ResourceGroupName -AccountName $StorageAccount.StorageAccountName
 $DestinationContext = New-AzStorageContext –storageAccountName $StorageAccount.StorageAccountName -StorageAccountKey ($StorageAccountKey).Value[0]
+[String]$DestinationContainerName = $StorageAccount.Name
+[String]$DestinationContainer = $DestinationContainerName.Trim()
 #endregion
 
 #region Begin Snapshot Creation
-foreach ($VirtualMachine in $VirtualMachines)
-{
+$VirtualMachines | ForEach-Object -Parallel {
+
+    $DestinationContainer = $Using:DestinationContainer
+    $DestinationContext = $Using:DestinationContext
+
     $SnapShots = @()
+    $VirtualMachineName = $_.Name
 
     # Identify OS Type
-    if ($VirtualMachine.OSProfile.LinuxConfiguration)
+    if ($_.OSProfile.LinuxConfiguration)
     {
         $VirtualMachineOSType = 'Linux'
     }
     else
-    {   
+    {
         $VirtualMachineOSType = 'Windows'
     }
 
     Write-Host "Virtual Machine Operating System is $VirtualMachineOSType" -ForegroundColor Green
-    Write-Host "Preparing Virtual Machine $($VirtualMachine.Name) Snapshot" -ForegroundColor White
+    Write-Host "Preparing Virtual Machine $VirtualMachineName Snapshot" -ForegroundColor White
 
-    $VirtualMachineStorageProfile = $VirtualMachine.StorageProfile
+    $VirtualMachineStorageProfile = $_.StorageProfile
 
     # Get VM PowerState and power off if running
-    if ((Get-AzVM -ResourceGroupName $VirtualMachine.ResourceGroupName -Name $VirtualMachine.Name -Status).Statuses.DisplayStatus[1] -eq 'VM running')
+    if ((Get-AzVM -ResourceGroupName $_.ResourceGroupName -Name $_.Name -Status).Statuses.DisplayStatus[1] -eq 'VM running')
     {
         $VirtualMachinePowerState = 'Running'
-        Write-Host "Virtual Machine $($VirtualMachine.Name) is currently running." -ForegroundColor Yellow
+        Write-Host "Virtual Machine $VirtualMachineName is currently running." -ForegroundColor Yellow
         Write-Host "Powering off the virtual Machine before taking the Snapshot." -ForegroundColor Yellow
-        Stop-AzVM -Name $VirtualMachine.Name -ResourceGroupName $VirtualMachine.ResourceGroupName -Force -Verbose
+        Stop-AzVM -Name $VirtualMachineName -ResourceGroupName $_.ResourceGroupName -Force -Verbose
     }
 
     #region OS Disk Snapshot
-    Write-Host "Creating OS Disk Snapshot Config for Virtual Machine $($VirtualMachine.Name)" -ForegroundColor White
+    Write-Host "Creating OS Disk Snapshot Config for Virtual Machine $VirtualMachineName" -ForegroundColor Green
     $OSDiskSnapshotConfig = New-AzSnapshotConfig -SourceUri $VirtualMachineStorageProfile.OsDisk.ManagedDisk.id `
         -CreateOption Copy `
-        -Location $VirtualMachine.Location `
+        -Location $_.Location `
         -OsType $VirtualMachineOSType `
         -NetworkAccessPolicy AllowAll `
         -Verbose
 
-    $SnapshotNameOsDisk = "$($VirtualMachine.name)_OSDisk_SS"
+    $SnapshotNameOsDisk = $VirtualMachineName + "_OSDisk_SS"
 
-    Write-Host "Taking OS Disk Snapshot for Virtual Machine $($VirtualMachine.Name)" -ForegroundColor Green
-    $SnapShots += New-AzSnapshot -ResourceGroupName $VirtualMachine.ResourceGroupName -SnapshotName $SnapshotNameOsDisk -Snapshot $OSDiskSnapshotConfig -Verbose -ErrorAction Stop
+    Write-Host "Taking OS Disk Snapshot for Virtual Machine $VirtualMachineName" -ForegroundColor Green
+    $SnapShots += New-AzSnapshot -ResourceGroupName $_.ResourceGroupName -SnapshotName $SnapshotNameOsDisk -Snapshot $OSDiskSnapshotConfig -Verbose -ErrorAction Stop
     #endregion
 
     #region Data Disk Snapshots
     if ($VirtualMachineStorageProfile.DataDisks)
     {
         [Int]$DataDiskNumber = '0'
-        Write-Host "Virtual Machine $($VirtualMachine.name) has Data Disks" 
+        Write-Host "Virtual Machine $VirtualMachineName has Data Disks" 
         Write-Host "Snapshots of the data disks will be created"
  
         foreach ($DataDisk in $VirtualMachineStorageProfile.DataDisks) 
         {
-            $DataDisk = Get-AzDisk -ResourceGroupName $VirtualMachine.ResourceGroupName -DiskName $DataDisk.Name
+            $DataDisk = Get-AzDisk -ResourceGroupName $_.ResourceGroupName -DiskName $DataDisk.Name
  
-            Write-Host "Creating Snapshot of Virtual Machine $($VirtualMachine.name) Data Disk $($DataDisk.Name)"
+            Write-Host "Creating Snapshot of Virtual Machine $VirtualMachineName Data Disk $($DataDisk.Name)"
  
             $DataDiskSnapshotConfig = New-AzSnapshotConfig -SourceUri $DataDisk.Id -CreateOption Copy -Location $Location
-            $DataDiskSnapshotName = "$($VirtualMachine.name)_DataDisk_SS$DataDiskNumber"
+            $DataDiskSnapshotName = $VirtualMachineName + "_DataDisk_SS" + $DataDiskNumber
  
-            $SnapShots += New-AzSnapshot -ResourceGroupName $VirtualMachine.ResourceGroupName -SnapshotName $DataDiskSnapshotName -Snapshot $DataDiskSnapshotConfig -ErrorAction Stop
+            $SnapShots += New-AzSnapshot -ResourceGroupName $_.ResourceGroupName -SnapshotName $DataDiskSnapshotName -Snapshot $DataDiskSnapshotConfig -ErrorAction Stop
           
-            Write-Host "Virtual Machine $($VirtualMachine.Name) Data Disk $($DataDisk.Name) Complete"
+            Write-Host "Virtual Machine $VirtualMachineName Data Disk $($DataDisk.Name) Complete"
 
             $DataDiskNumber++
         }
@@ -415,33 +422,36 @@ foreach ($VirtualMachine in $VirtualMachines)
     #endregion
 
     #region Copy Snapshots to Storage Account then remove Snapshots
-    [String]$DestinationContainerName = $($StorageAccount.Name)
-    $DestinationContainerName = $DestinationContainerName.Trim()
+    $SnapShots | ForEach-Object -Parallel {
 
-    foreach ($SnapShot in $SnapShots)
-    {
-        Write-Host "Granting Hot Access to Snapshot $($SnapShot.Name)" -ForegroundColor Green
-        $SnapShotSAS = Grant-AzSnapshotAccess -ResourceGroupName $SnapShot.ResourceGroupName -SnapshotName $($SnapShot.Name) -DurationInSecond 3600 -Access Read -Verbose
-            
-        Write-Host "Copying Snapshot $($SnapShot.Name) to blob storage" -ForegroundColor Green
-        $BlobCopy = Start-AzStorageBlobCopy -AbsoluteUri $SnapShotSAS.AccessSAS -DestContainer $DestinationContainerName -DestContext $DestinationContext -DestBlob ("$($VirtualMachine.Name)/" + $($SnapShot.Name) + '.vhd') -Verbose -Force
+        $DestinationContainer = $Using:DestinationContainer
+        $DestinationContext = $Using:DestinationContext
+        $SnapShotName = $_.Name
+        $FolderName = $SnapShotName.Split('_')[0]
+
+        Write-Host "Granting Hot Access to Snapshot $SnapShotName" -ForegroundColor Green
+        $SnapShotSAS = Grant-AzSnapshotAccess -ResourceGroupName $_.ResourceGroupName -SnapshotName $SnapShotName -DurationInSecond 3600 -Access Read -Verbose -ErrorAction Stop
+
+        Write-Host "Copying Snapshot $SnapShotName to blob storage" -ForegroundColor Green
+        $BlobCopy = Start-AzStorageBlobCopy -AbsoluteUri $SnapShotSAS.AccessSAS -DestContainer $DestinationContainer -DestContext $DestinationContext -DestBlob ($FolderName + '/' + $SnapShotName + '.vhd') -Verbose -Force -ErrorAction Stop
 
         Write-Host "Waiting for blob copy to complete..." -ForegroundColor White 
-        Get-AzStorageBlobCopyState -Blob $BlobCopy.Name -Container $DestinationContainerName -Context $DestinationContext -WaitForComplete
+        Get-AzStorageBlobCopyState -Blob $BlobCopy.Name -Container $DestinationContainer -Context $DestinationContext -WaitForComplete
 
         Write-Host "Removing Snapshot hot access" -ForegroundColor White
-        Revoke-AzSnapshotAccess -ResourceGroupName $SnapShot.ResourceGroupName -SnapshotName $($SnapShot.Name)
+        Revoke-AzSnapshotAccess -ResourceGroupName $_.ResourceGroupName -SnapshotName $SnapShotName
 
-        Write-Host "Removing Snapshot $($SnapShot.Name)" -ForegroundColor White
-        $SnapShot | Remove-AzSnapshot -Force -Verbose
+        Write-Host "Removing Snapshot $SnapShotName" -ForegroundColor White
+        $_ | Remove-AzSnapshot -Force -Verbose
     }
     #endregion
 
     # Poweron VM if it was initially running
     if ($VirtualMachinePowerState -eq 'Running')
     {
-        Write-Host "Starting Virtual Machine $($VirtualMachine.Name)" -ForegroundColor Green
-        Start-AzVM -Name $VirtualMachine.Name -ResourceGroupName $VirtualMachine.ResourceGroupName
+        Write-Host "Starting Virtual Machine $VirtualMachineName" -ForegroundColor Green
+        Start-AzVM -Name $_.Name -ResourceGroupName $_.ResourceGroupName
     }
 }
 #endregion
+
