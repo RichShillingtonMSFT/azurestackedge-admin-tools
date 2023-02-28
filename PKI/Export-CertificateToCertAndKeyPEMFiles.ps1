@@ -32,16 +32,12 @@
 
     [System.IO.File]::WriteAllLines($CertFileOutputPath, $out)
 
-    # Read the private key into an RSA CNG object:
     $RSACng = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Cert)
 
-    # Get the bytes of the private key
     $KeyBytes = $RSACng.Key.Export([System.Security.Cryptography.CngKeyBlobFormat]::Pkcs8PrivateBlob)
 
-    # Encode the bytes (Base64)
     $KeyBase64 = [System.Convert]::ToBase64String($KeyBytes, [System.Base64FormattingOptions]::InsertLineBreaks)
 
-    # Put it all together
     $KeyPem = @"
     -----BEGIN PRIVATE KEY-----
     $KeyBase64
